@@ -1,0 +1,97 @@
+name: carrel deploy
+description: Upload a built artifact to a carrel app and wait until the machine serves it.
+branding:
+  icon: upload-cloud
+  color: blue
+inputs:
+  tenant:
+    description: carrel tenant that owns the app (your username or a project).
+    required: true
+  app:
+    description: App name given to app_link.
+    required: true
+  artifact:
+    description: Path to a .tar.gz with exactly what the start command runs.
+    required: true
+  url:
+    description: carrel origin.
+    default: https://carrel.winlab.tw
+  timeout:
+    description: Seconds to wait for the machine to report live or failed.
+    default: "300"
+outputs:
+  release:
+    description: Release id.
+    value: ${{ steps.deploy.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: deploy
+      shell: bash
+      env:
+        TENANT: ${{ inputs.tenant }}
+        APP: ${{ inputs.app }}
+        ARTIFACT: ${{ inputs.artifact }}
+        URL: ${{ inputs.url }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "::error::Add 'permissions: id-token: write' to the workflow."
+          exit 1
+        fi
+        [ -f "$ARTIFACT" ] || { echo "::error::Artifact $ARTIFACT not found."; exit 1; }
+        URL=${URL%/}
+        audience=${URL#*://}
+        audience=${audience%%/*}
+        token() {
+          curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value
+        }
+        base="$URL/apps/v1/$TENANT/$APP/releases"
+
+        oidc=$(token)
+        echo "::add-mask::$oidc"
+        size=$(stat -c %s "$ARTIFACT")
+        echo "Uploading $ARTIFACT ($size bytes) to $TENANT/$APP"
+        response=$(curl -sS -X POST -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
+          -H "Content-Type: application/gzip" --upload-file "$ARTIFACT" "$base")
+        code=${response##*$'\n'}
+        body=${response%$'\n'*}
+        if [ "$code" != 200 ]; then
+          echo "::error::Upload failed with HTTP $code: $(jq -r '.error.message // .' <<<"$body" 2>/dev/null || echo "$body")"
+          exit 1
+        fi
+        release=$(jq -r .release.id <<<"$body")
+        echo "release=$release" >>"$GITHUB_OUTPUT"
+        echo "Release $release stored; waiting for the machine"
+
+        deadline=$((SECONDS + TIMEOUT))
+        warned=""
+        while :; do
+          oidc=$(token)
+          echo "::add-mask::$oidc"
+          status=$(curl -fsS -H "Authorization: Bearer $oidc" "$base/$release")
+          state=$(jq -r .release.state <<<"$status")
+          agent=$(jq -r .release.agent <<<"$status")
+          case "$state" in
+          live)
+            echo "Release $release is live."
+            exit 0
+            ;;
+          failed)
+            echo "::error::Release $release failed: $(jq -r '.release.error // "unknown"' <<<"$status")"
+            jq -r '.release.log // empty' <<<"$status"
+            exit 1
+            ;;
+          esac
+          if [ "$agent" != connected ] && [ -z "$warned" ]; then
+            echo "::warning::carrel-deployd is $agent on the machine; run the install line from app_link."
+            warned=1
+          fi
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "::error::Release $release is still $state after ${TIMEOUT}s."
+            exit 1
+          fi
+          sleep 5
+        done
