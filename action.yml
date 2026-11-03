@@ -68,9 +68,15 @@ runs:
 
         deadline=$((SECONDS + TIMEOUT))
         warned=""
+        # Polled every second: a deploy takes seconds, and a 5 s poll added
+        # up to 5 s to every one. The token is reused for 2 minutes.
+        minted=-1000
         while :; do
-          oidc=$(token)
-          echo "::add-mask::$oidc"
+          if [ $((SECONDS - minted)) -ge 120 ]; then
+            oidc=$(token)
+            echo "::add-mask::$oidc"
+            minted=$SECONDS
+          fi
           status=$(curl -fsS -H "Authorization: Bearer $oidc" "$base/$release")
           state=$(jq -r .release.state <<<"$status")
           agent=$(jq -r .release.agent <<<"$status")
@@ -93,5 +99,5 @@ runs:
             echo "::error::Release $release is still $state after ${TIMEOUT}s."
             exit 1
           fi
-          sleep 5
+          sleep 1
         done
