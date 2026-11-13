@@ -1,28 +1,37 @@
 name: carrel deploy
-description: Upload a built artifact to a carrel app and wait until the machine serves it.
+description: Deploy a build to a carrel app or function and wait until it serves.
 branding:
   icon: upload-cloud
   color: blue
 inputs:
   tenant:
-    description: carrel tenant that owns the app (your username or a project).
+    description: carrel tenant that owns the app or function (your username or a project).
     required: true
   app:
-    description: App name given to app_link.
-    required: true
+    description: App name given to app_link. Give app or function.
+    required: false
   artifact:
-    description: Path to a .tar.gz with exactly what the start command runs.
-    required: true
+    description: For an app, path to a .tar.gz with exactly what the start command runs.
+    required: false
+  function:
+    description: Function name given to function_link. Give app or function.
+    required: false
+  image:
+    description: For a function, the pushed image named by its digest, such as ghcr.io/owner/app@sha256:...
+    required: false
   url:
     description: carrel origin.
     default: https://carrel.winlab.tw
   timeout:
-    description: Seconds to wait for the machine to report live or failed.
+    description: Seconds to wait for the deploy to go live or fail.
     default: "300"
 outputs:
   release:
-    description: Release id.
+    description: App release id.
     value: ${{ steps.deploy.outputs.release }}
+  version:
+    description: Function version.
+    value: ${{ steps.deploy.outputs.version }}
 runs:
   using: composite
   steps:
@@ -32,6 +41,8 @@ runs:
         TENANT: ${{ inputs.tenant }}
         APP: ${{ inputs.app }}
         ARTIFACT: ${{ inputs.artifact }}
+        FUNCTION: ${{ inputs.function }}
+        IMAGE: ${{ inputs.image }}
         URL: ${{ inputs.url }}
         TIMEOUT: ${{ inputs.timeout }}
       run: |
@@ -40,7 +51,10 @@ runs:
           echo "::error::Add 'permissions: id-token: write' to the workflow."
           exit 1
         fi
-        [ -f "$ARTIFACT" ] || { echo "::error::Artifact $ARTIFACT not found."; exit 1; }
+        if [ -n "$APP" ] && [ -n "$FUNCTION" ]; then
+          echo "::error::Give app or function, not both."
+          exit 1
+        fi
         URL=${URL%/}
         audience=${URL#*://}
         audience=${audience%%/*}
@@ -48,55 +62,95 @@ runs:
           curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value
         }
-        base="$URL/apps/v1/$TENANT/$APP/releases"
+        # check reads a response saved as body, then the HTTP code.
+        check() {
+          code=${response##*$'\n'}
+          body=${response%$'\n'*}
+          if [ "$code" != 200 ]; then
+            echo "::error::$1 failed with HTTP $code: $(jq -r '.error.message // .' <<<"$body" 2>/dev/null || echo "$body")"
+            exit 1
+          fi
+        }
 
         oidc=$(token)
         echo "::add-mask::$oidc"
-        size=$(stat -c %s "$ARTIFACT")
-        echo "Uploading $ARTIFACT ($size bytes) to $TENANT/$APP"
-        response=$(curl -sS -X POST -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
-          -H "Content-Type: application/gzip" --upload-file "$ARTIFACT" "$base")
-        code=${response##*$'\n'}
-        body=${response%$'\n'*}
-        if [ "$code" != 200 ]; then
-          echo "::error::Upload failed with HTTP $code: $(jq -r '.error.message // .' <<<"$body" 2>/dev/null || echo "$body")"
-          exit 1
+        minted=$SECONDS
+        if [ -n "$FUNCTION" ]; then
+          [[ "$IMAGE" == *@sha256:* ]] || { echo "::error::image must be named by its digest, such as ghcr.io/owner/app@sha256:<digest> from docker/build-push-action."; exit 1; }
+          base="$URL/functions/v1/deploy/$TENANT/$FUNCTION"
+          echo "Deploying $IMAGE to $TENANT/$FUNCTION"
+          response=$(curl -sS -X POST -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
+            -H "Content-Type: application/json" --data "$(jq -cn --arg image "$IMAGE" '{image: $image}')" "$base")
+          check Deploy
+          id=$(jq -r .version.version <<<"$body")
+          echo "version=$id" >>"$GITHUB_OUTPUT"
+          echo "Version $id is building on the function host"
+          status_url="$base/$id"
+        else
+          [ -n "$APP" ] || { echo "::error::Give app or function."; exit 1; }
+          [ -f "$ARTIFACT" ] || { echo "::error::Artifact $ARTIFACT not found."; exit 1; }
+          base="$URL/apps/v1/$TENANT/$APP/releases"
+          size=$(stat -c %s "$ARTIFACT")
+          echo "Uploading $ARTIFACT ($size bytes) to $TENANT/$APP"
+          response=$(curl -sS -X POST -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
+            -H "Content-Type: application/gzip" --upload-file "$ARTIFACT" "$base")
+          check Upload
+          id=$(jq -r .release.id <<<"$body")
+          echo "release=$id" >>"$GITHUB_OUTPUT"
+          echo "Release $id stored; waiting for the machine"
+          status_url="$base/$id"
         fi
-        release=$(jq -r .release.id <<<"$body")
-        echo "release=$release" >>"$GITHUB_OUTPUT"
-        echo "Release $release stored; waiting for the machine"
 
         deadline=$((SECONDS + TIMEOUT))
         warned=""
         # Polled every second: a deploy takes seconds, and a 5 s poll added
-        # up to 5 s to every one. The token is reused for 2 minutes.
-        minted=-1000
+        # up to 5 s to every one. A token is reused for 2 minutes from when
+        # it was fetched, so a slow upload does not leave it expired.
         while :; do
           if [ $((SECONDS - minted)) -ge 120 ]; then
             oidc=$(token)
             echo "::add-mask::$oidc"
             minted=$SECONDS
           fi
-          status=$(curl -fsS -H "Authorization: Bearer $oidc" "$base/$release")
-          state=$(jq -r .release.state <<<"$status")
-          agent=$(jq -r .release.agent <<<"$status")
+          status=$(curl -fsS -H "Authorization: Bearer $oidc" "$status_url")
+          if [ -n "$FUNCTION" ]; then
+            state=$(jq -r .version.state <<<"$status")
+            agent=$(jq -r .version.host <<<"$status")
+            who="the function host"
+          else
+            state=$(jq -r .release.state <<<"$status")
+            agent=$(jq -r .release.agent <<<"$status")
+            who="carrel-deployd on the machine"
+          fi
           case "$state" in
           live)
-            echo "Release $release is live."
+            echo "$id is live."
+            exit 0
+            ;;
+          superseded)
+            echo "::notice::$id built, but a newer version went live first."
             exit 0
             ;;
           failed)
-            echo "::error::Release $release failed: $(jq -r '.release.error // "unknown"' <<<"$status")"
-            jq -r '.release.log // empty' <<<"$status"
+            if [ -n "$FUNCTION" ]; then
+              echo "::error::Version $id failed: $(jq -r '.version.error // "unknown"' <<<"$status")"
+            else
+              echo "::error::Release $id failed: $(jq -r '.release.error // "unknown"' <<<"$status")"
+              jq -r '.release.log // empty' <<<"$status"
+            fi
             exit 1
             ;;
           esac
           if [ "$agent" != connected ] && [ -z "$warned" ]; then
-            echo "::warning::carrel-deployd is $agent on the machine; run the install line from app_link."
+            if [ -n "$FUNCTION" ]; then
+              echo "::warning::$who is $agent; the version builds when it reconnects."
+            else
+              echo "::warning::$who is $agent; run the install line from app_link."
+            fi
             warned=1
           fi
           if [ "$SECONDS" -ge "$deadline" ]; then
-            echo "::error::Release $release is still $state after ${TIMEOUT}s."
+            echo "::error::$id is still $state after ${TIMEOUT}s."
             exit 1
           fi
           sleep 1
