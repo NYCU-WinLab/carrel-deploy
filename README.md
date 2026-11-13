@@ -42,6 +42,7 @@ after the first `function_deploy`, then commit the returned workflow. It builds 
 it to ghcr.io and sends its digest:
 
 ```yaml
+      - uses: docker/setup-buildx-action@v3
       - id: image
         uses: docker/build-push-action@v6
         with:

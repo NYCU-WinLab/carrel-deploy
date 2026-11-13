@@ -74,8 +74,9 @@ runs:
 
         oidc=$(token)
         echo "::add-mask::$oidc"
+        minted=$SECONDS
         if [ -n "$FUNCTION" ]; then
-          [[ "$IMAGE" == *@sha256:* ]] || { echo "::error::image must be named by its digest, such as ghcr.io/owner/app@\${{ steps.image.outputs.digest }}."; exit 1; }
+          [[ "$IMAGE" == *@sha256:* ]] || { echo "::error::image must be named by its digest, such as ghcr.io/owner/app@sha256:<digest> from docker/build-push-action."; exit 1; }
           base="$URL/functions/v1/deploy/$TENANT/$FUNCTION"
           echo "Deploying $IMAGE to $TENANT/$FUNCTION"
           response=$(curl -sS -X POST -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
@@ -103,8 +104,8 @@ runs:
         deadline=$((SECONDS + TIMEOUT))
         warned=""
         # Polled every second: a deploy takes seconds, and a 5 s poll added
-        # up to 5 s to every one. The token is reused for 2 minutes.
-        minted=$SECONDS
+        # up to 5 s to every one. A token is reused for 2 minutes from when
+        # it was fetched, so a slow upload does not leave it expired.
         while :; do
           if [ $((SECONDS - minted)) -ge 120 ]; then
             oidc=$(token)
