@@ -90,9 +90,11 @@ runs:
         comment_preview() {
           [ -n "$PR" ] && [ -n "$GH_TOKEN" ] || return 0
           api="${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/issues"
-          text=$(printf '<!-- carrel-preview -->\nPreview: %s\n\nUpdated for %s.' "$1" "$GITHUB_SHA")
+          # One comment per function: two functions of one repository keep their own.
+          marker="<!-- carrel-preview $TENANT/$FUNCTION -->"
+          text=$(printf '%s\nPreview of %s: %s\n\nUpdated for %s.' "$marker" "$FUNCTION" "$1" "$GITHUB_SHA")
           existing=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "$api/$PR/comments?per_page=100" |
-            jq -r '[.[] | select(.body | startswith("<!-- carrel-preview -->"))][0].id // empty') || return 1
+            jq -r --arg m "$marker" '[.[] | select(.user.login == "github-actions[bot]" and (.body | startswith($m)))][0].id // empty') || return 1
           if [ -n "$existing" ]; then
             curl -fsS -o /dev/null -X PATCH -H "Authorization: Bearer $GH_TOKEN" "$api/comments/$existing" --data "$(jq -cn --arg b "$text" '{body: $b}')"
           else
