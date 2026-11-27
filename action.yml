@@ -105,7 +105,9 @@ runs:
         minted=$SECONDS
         if [ "$CLOSE" = true ]; then
           [ -n "$FUNCTION" ] || { echo "::error::close-preview needs function."; exit 1; }
-          response=$(curl -sS -X DELETE -w '\n%{http_code}' -H "Authorization: Bearer $oidc" "$URL/functions/v1/deploy/$TENANT/$FUNCTION/preview")
+          [ -n "$PR" ] || { echo "::error::close-preview runs on a pull_request event."; exit 1; }
+          response=$(curl -sS -X DELETE -w '\n%{http_code}' -H "Authorization: Bearer $oidc" \
+            -H "Content-Type: application/json" --data "$(jq -cn --argjson pr "$PR" '{pr: $pr}')" "$URL/functions/v1/deploy/$TENANT/$FUNCTION/preview")
           check "Removing the preview"
           echo "Removed: $(jq -r '.removed | if length == 0 then "nothing" else join(", ") end' <<<"$body")"
           exit 0
