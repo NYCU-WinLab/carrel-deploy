@@ -94,7 +94,7 @@ runs:
           marker="<!-- carrel-preview $TENANT/$FUNCTION -->"
           text=$(printf '%s\nPreview of %s: %s\n\nUpdated for %s.' "$marker" "$FUNCTION" "$1" "$GITHUB_SHA")
           existing=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "$api/$PR/comments?per_page=100" |
-            jq -r --arg m "$marker" '[.[] | select(.user.login == "github-actions[bot]" and (.body | startswith($m)))][0].id // empty') || return 1
+            jq -r --arg m "$marker" '[.[] | select(.body | startswith($m))][0].id // empty') || return 1
           if [ -n "$existing" ]; then
             curl -fsS -o /dev/null -X PATCH -H "Authorization: Bearer $GH_TOKEN" "$api/comments/$existing" --data "$(jq -cn --arg b "$text" '{body: $b}')"
           else
