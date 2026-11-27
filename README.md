@@ -60,6 +60,21 @@ The new version keeps the function's settings and environment. The run fails whe
 fails. A ghcr.io package is private by default: make it public, or give the function credentials
 with `function_registry`.
 
+## Pull request previews
+
+Call `function_link` with `previews: true`, and commit the workflow it returns. Each pull request
+from the repository itself then deploys to its own function, `pr-<number>-<function>`, at
+`https://pr-<number>-<function>.<tenant>.winlab.tw`:
+
+1. Opening or pushing to the pull request builds the preview and comments its URL on the pull
+   request, in one comment that each push updates.
+2. Closing or merging it runs the `close` job, which removes the preview with
+   `close-preview: true`.
+
+A preview starts from the function's settings, without its environment, schedules or registry
+credentials. Pull requests from forks get no OIDC token, so they get no preview. Push to the
+linked branch once before the first preview.
+
 ## Inputs
 
 | Input | Required | Default | Meaning |
@@ -71,12 +86,14 @@ with `function_registry`.
 | `image` | for a function | | the pushed image named by its digest |
 | `url` | no | `https://carrel.winlab.tw` | carrel origin |
 | `timeout` | no | `300` | seconds to wait for `live` or `failed` |
+| `close-preview` | no | `false` | remove the closed pull request's preview instead of deploying |
+| `github-token` | no | `github.token` | comments the preview URL; needs `pull-requests: write` |
 
 ## What carrel checks
 
 1. The token comes from GitHub Actions and names this carrel as its audience.
 2. The repository and branch match the linked app or function.
-3. The event is `push` or `workflow_dispatch`.
+3. The event is `push` or `workflow_dispatch`, or exactly `pull_request` for a preview.
 4. The repository id matches the first accepted deploy.
 
 The design is in carrel PLAN sections 7.9 (apps) and 7.11 (functions).
